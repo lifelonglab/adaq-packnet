@@ -1,3 +1,5 @@
+import numpy as np
+import torch.nn as nn
 
 
 def set_weights_by_mask(mask, net, share_mask=None):
@@ -91,6 +93,7 @@ def init_population(model, nr, size, min, max, manager=None, current_masks=None,
 
     return population, mask, cm, mask__
 
+
 def compute_size(net):
     size = 0
     state_dict = net.state_dict()
@@ -99,12 +102,44 @@ def compute_size(net):
             size += np.prod(v.size())     
     return size
 
-def compute_average_sparsity(net, percentage):
+
+def compute_average_sparsity_by_percentage(model, percentage):
     size = 0
-    state_dict = net.state_dict()
-    counter = 0
-    for k, v in state_dict.items():
-        if len(v.size()) > 1:
-            size += percentage[counter]*np.prod(v.size())
-            counter += 1     
+    for module_idx, module in enumerate(model.modules()):
+        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+            sz = module.weight.data.size()
+            if (len(sz) == 4):
+                                
+                #idxs = (masks[module_idx].flatten() == 1).nonzero()
+
+                #import pdb
+                #pdb.set_trace()
+                #idxs = idxs.numpy()
+                size += np.prod(sz)*percentage[module_idx]
+
+            if (len(sz) == 2):
+                #idxs = (masks[module_idx].flatten() == 1).nonzero()
+                #idxs = idxs.numpy()
+                size += np.prod(sz)*percentage[module_idx]
+    return size
+
+
+def compute_average_sparsity(model, masks):
+    size = 0
+    for module_idx, module in enumerate(model.modules()):
+        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+            sz = module.weight.data.size()
+            if (len(sz) == 4):
+                                
+                idxs = (masks[module_idx].flatten() > 0).nonzero()
+
+                #import pdb
+                #pdb.set_trace()
+                idxs = idxs.numpy()
+                size += idxs[0].size
+
+            if (len(sz) == 2):
+                idxs = (masks[module_idx].flatten() > 0).nonzero()
+                idxs = idxs.numpy()
+                size += idxs[0].size
     return size

@@ -27,7 +27,9 @@ import torchvision.transforms as transforms
 import random
 import os
 
-
+from prune_helper import compute_average_sparsity
+from prune_helper import compute_average_sparsity_by_percentage
+from prune_helper import compute_size
 from non_linear_quantization import vquant
 from prune_helper import set_weights_by_mask, init_population
 from prune_manager import Manager
@@ -56,7 +58,7 @@ FLAGS.add_argument('--lr_decay_factor', type=float,
                    help='Multiply lr by this much every step of decay')
 FLAGS.add_argument('--epochs', type=int, default=10,
                    help='Number of initial finetuning epochs')
-FLAGS.add_argument('--search_epochs', type=int, default=10,
+FLAGS.add_argument('--search_epochs', type=int, default=30,
                    help='Number of initial finetuning epochs')
 FLAGS.add_argument('--finetune_epochs', type=int,
                    help='Number of initial finetuning epochs')
@@ -80,6 +82,8 @@ FLAGS.add_argument('--loadname', type=str, default='cifar100_0.pt',
                    help='Location to save model')
 FLAGS.add_argument('--initname', type=str, default='cifar100_0.pt',
                    help='Location to init model')
+FLAGS.add_argument('--checkpoint', type=str, default='checkpoint.pt',
+                   help='Name of the checkpoint file')
 
 # Pruning options.
 FLAGS.add_argument('--prune_method', type=str,
@@ -93,6 +97,8 @@ FLAGS.add_argument('--train_biases', action='store_true', default=False,
                    help='use separate biases or not')
 FLAGS.add_argument('--train_bn', action='store_true', default=False,
                    help='train batch norm or not')
+FLAGS.add_argument('--population_size', type=int, default=2)
+
 # Other.
 FLAGS.add_argument('--quantization_method', type=str,
                    choices=['nonlinear'],
@@ -103,8 +109,9 @@ FLAGS.add_argument('--init_dump', action='store_true', default=False,
                    help='Initial model dump.')
 FLAGS.add_argument('--task_number', type=int, default=10)
 FLAGS.add_argument('--task_id', type=int, default=0)
+FLAGS.add_argument('--classes_per_task', type=int, default=10)
 FLAGS.add_argument('--V_min', type=float, default=0.4)
-FLAGS.add_argument('--V_max', type=float, default=0.4)
+FLAGS.add_argument('--V_max', type=float, default=0.7)
     
 
 def set_weights_by_mask(mask, net):
@@ -145,31 +152,31 @@ def init_mask(model, layers, percentage, previous_masks, task_id):
             sz = module.weight.data.size()
             if (len(sz) == 4):
                 
-                    #import pdb
-                    #pdb.set_trace()
-                    idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
-                    idxs = idxs.numpy()
+                #import pdb
+                #pdb.set_trace()
+                idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
+                idxs = idxs.numpy()
 
-                    mask_[counter] = np.ones((sz[0], sz[1], sz[2], sz[3]))
+                mask_[counter] = np.ones((sz[0], sz[1], sz[2], sz[3]))
 
-                    #elem = np.random.choice(mask_[counter].size, int(percentage[counter]*mask_[counter].size), replace=False)
-                    elem = np.random.choice(idxs.size, int(percentage[counter]*idxs.size), replace=False)
-                    mask_[counter] = mask_[counter].flatten()
-                    mask_[counter][idxs[elem]] = 0.0
+                #elem = np.random.choice(mask_[counter].size, int(percentage[counter]*mask_[counter].size), replace=False)
+                elem = np.random.choice(idxs.size, int(percentage[counter]*idxs.size), replace=False)
+                mask_[counter] = mask_[counter].flatten()
+                mask_[counter][idxs[elem]] = 0.0
 
-                    mask_[counter] = np.reshape(mask_[counter], (sz[0], sz[1], sz[2], sz[3]))
+                mask_[counter] = torch.from_numpy(np.reshape(mask_[counter], (sz[0], sz[1], sz[2], sz[3])))
 
             if (len(sz) == 2):
-                    idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
-                    idxs = idxs.numpy()
+                idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
+                idxs = idxs.numpy()
 
-                    mask_[counter] = np.ones((sz[0], sz[1]))
+                mask_[counter] = np.ones((sz[0], sz[1]))
 
-                    #elem = np.random.choice(mask_[counter].size, int(percentage[counter]*mask_[counter].size), replace=False)
-                    elem = np.random.choice(idxs.size, int(percentage[counter]*idxs.size), replace=False)
-                    mask_[counter] = mask_[counter].flatten()
-                    mask_[counter][idxs[elem]] = 0.0
-                    mask_[counter] = np.reshape(mask_[counter], (sz[0], sz[1]))
+                #elem = np.random.choice(mask_[counter].size, int(percentage[counter]*mask_[counter].size), replace=False)
+                elem = np.random.choice(idxs.size, int(percentage[counter]*idxs.size), replace=False)
+                mask_[counter] = mask_[counter].flatten()
+                mask_[counter][idxs[elem]] = 0.0
+                mask_[counter] = torch.from_numpy(np.reshape(mask_[counter], (sz[0], sz[1])))
         counter = counter + 1
     return mask_
 
@@ -307,6 +314,9 @@ def main():
     ckpt = torch.load(args.save_prefix + args.loadname) 
     model = ckpt['model']
     model.cuda()
+
+    #import pdb
+    #pdb.set_trace()
    
     previous_masks = ckpt['previous_masks']
     dataset2idx = ckpt['dataset2idx']
@@ -462,37 +472,113 @@ def main():
                 
                     counter += 1
             mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
+            
 
         if args.prune_method == 'lottery_ticket_search':
-            layers = {}
-            percentage = {} 
-            counter = 0
-            state_dict = model.state_dict()
 
-            for module_idx, module in enumerate(model.modules()):
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                    percentage[module_idx] = args.V_min + random.random()*(args.V_max-args.V_min)
-                    layers[module_idx] = counter
+            sparsities = []
+            a_sparsities = []
+            results = []
+            size = compute_size(model)
+            sz_before = compute_average_sparsity(model, previous_masks)
+
+            fitness = []
+            masks_list = []
+            #import pdb
+            #pdb.set_trace()
+
+            for solution_id in range(args.population_size):
+                layers = {}
+                percentage = {} 
+                counter = 0
+                state_dict = model.state_dict()
+
+                for module_idx, module in enumerate(model.modules()):
+                    if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                        percentage[module_idx] = args.V_min + random.random()*(args.V_max-args.V_min)
+                        layers[module_idx] = counter
                 
-                    counter += 1
-            mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
+                        counter += 1
 
-            model_c = copy.deepcopy(model)
-            manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, masks=mask_t)
-            manager.pruner.current_masks = copy.deepcopy(previous_masks)
-            ##manager.pruner.make_weights_random()
+                mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
+
+                model_c = copy.deepcopy(model)
+                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, masks=mask_t)
+                manager.pruner.current_masks = copy.deepcopy(previous_masks)
+                manager.pruner.make_weights_random()
             
-            params_to_optimize = manager.model.parameters()
-            optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
+                params_to_optimize = manager.model.parameters()
+                optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
-            manager.train(train_loader, val_loader, args.search_epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint)
-            errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
+                manager.train(train_loader, val_loader, args.search_epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint)
+                errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
+
+                sz = compute_average_sparsity(model_c, mask_t)
+                results.append(100 - errors[0])
+                sparsities.append(percentage)
+                a_sparsities.append(1.0-(sz+sz_before)/size)
+                fitness.append([0.8*(100.0-errors[0])/100.0+0.2*(1.0-(sz+sz_before)/size)])
+                            
+            import pdb
+            pdb.set_trace()
+            #choose best
+            id_ = np.argmax(fitness)
+ 
+            mask_t = init_mask(model, layers, sparsities[id_], previous_masks, args.task_id)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t)
+
+
+        if args.prune_method == 'dynamic_mask_search':
+
+            sparsities = []
+            a_sparsities = []
+            results = []
+            size = compute_size(model)
+            fitness = []
+            #import pdb
+            #pdb.set_trace()
+            prune_perc_per_layer = {}
+
+            for solution_id in range(args.population_size):
+                layers = {}
+                percentage = {} 
+                counter = 0
+                state_dict = model.state_dict()
+
+                for module_idx, module in enumerate(model.modules()):
+                    if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                        prune_perc_per_layer[module_idx] = args.V_min + random.random()*(args.V_max-args.V_min)
+                        layers[module_idx] = counter
+                
+                        counter += 1
+
+                #mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
+
+                model_c = copy.deepcopy(model)
+                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None)
+                manager.pruner.current_masks = copy.deepcopy(previous_masks)
+                manager.pruner.make_weights_random()
             
+                params_to_optimize = manager.model.parameters()
+                optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
-        import pdb
-        pdb.set_trace()
+                manager.train(train_loader, val_loader, args.search_epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint)
+                errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
 
-        manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t)
+                sz = compute_average_sparsity_by_percentage(model_c, prune_perc_per_layer)
+                results.append(100 - errors[0])
+                sparsities.append(percentage)
+                a_sparsities.append(sz/size)
+                fitness.append([0.8*(100.0-errors[0])/100.0+0.2*sz/size])
+                            
+            import pdb
+            pdb.set_trace()
+            #choose best
+            id_ = np.argmax(fitness)
+ 
+            #mask_t = init_mask(model, layers, sparsities, previous_masks, args.task_id)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=sparsities[id_], masks=None)
+
 
         if args.mode == 'quantize_and_prune':
         
@@ -508,13 +594,13 @@ def main():
             params_to_optimize = manager.model.parameters()
             optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
-            manager.train(train_loader, val_loader, args.epochs, optimizer, save=True, savename=args.save_prefix, prune=True)
+            manager.train(train_loader, val_loader, args.epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
             errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)           
         
             manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks)
             manager.pruner.current_masks = copy.deepcopy(previous_masks)
 
-            #manager.train(train_loader, val_loader, 8, optimizer, save=True, savename=args.save_prefix, prune=True)
+            #manager.train(train_loader, val_loader, 8, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
             errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
             
             errors_ = errors

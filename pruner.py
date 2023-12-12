@@ -14,14 +14,19 @@ class SparsePruner(object):
 
     def __init__(self, model, prune_perc, previous_masks, train_bias, train_bn, dataset2idx):
         self.model = model
-        self.model_copy = model_copy
         
         self.prune_perc = prune_perc
         self.prune_perc_ = {}
 
+        #import pdb
+        #pdb.set_trace()
+
         for module_idx, module in enumerate(self.model.modules()):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                self.prune_perc_[module_idx] = prune_perc
+                if prune_perc is not None:
+                    self.prune_perc_[module_idx] = prune_perc[module_idx]
+                #else:
+                #    self.prune_perc_[module_idx] = prune_perc
 
         self.train_bias = train_bias
         self.train_bn = train_bn
@@ -29,11 +34,9 @@ class SparsePruner(object):
 
         self.current_masks = None
         self.previous_masks = previous_masks
-        self.model_ = model_
         
         self.current_dataset_idx = dataset2idx #previous_masks[valid_key].max()
         self.masks[self.current_dataset_idx] = previous_masks
-        self.shared_mask = share  
    
     def set_model_copy():
        for module_idx, module in enumerate(self.model_copy.modules()):
@@ -68,6 +71,10 @@ class SparsePruner(object):
                 # mask = 1 - remove_mask
                 previous_mask[remove_mask.eq(1)] = 0
         else:
+            #import pdb
+            #pdb.set_trace()
+  
+            #previous_mask[torch.from_numpy(mask_)==0] = 0
             previous_mask[mask_==0] = 0
             #previous_mask[torch.from_numpy(mask_.astype(int))==0] = 0
 
@@ -88,32 +95,32 @@ class SparsePruner(object):
         cmasks = copy.deepcopy(self.current_masks)
         self.current_masks = {}
 
-        print('Pruning each layer by removing %.2f%% of values' %
-              (100 * self.prune_perc))
+        #print('Pruning each layer by removing %.2f%% of values' %
+        #      (100 * self.prune_perc))
 
         counter = 0
   
         #for module_idx, module in enumerate(self.model_copy.modules()):
         for module_idx, module in enumerate(self.model.modules()):
-            if (isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear)) and counter != id:
-                if mask_ is not None:   
-                    mask__ = cmasks[module_idx] #mask_[str(counter)]
-                    mask___ = mask__
-
-                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=mask___, capacity=capacity)
-
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                if self.ticket_masks is not None:   
+                    #import pdb
+                    #pdb.set_trace()
+                    #mask__ = cmasks[module_idx] #mask_[str(counter)]                   
+                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=self.ticket_masks[module_idx], capacity=capacity)
                 else:                 
-                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=None, capacity=capacity)
-                     
+                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, capacity=capacity)
+                
                 self.current_masks[module_idx] = mask.cuda()
+
                 # Set pruned weights to 0.
                 weight = module.weight.data
-                weight[self.current_masks[module_idx].eq(0)] = 0.0
+                weight[mask.eq(0)] = 0.0
                 counter += 1
 
-            elif (isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear)) and counter == id:
-                counter += 1                    
-                self.current_masks[module_idx] = torch.zeros(module.weight.data.size()) + self.current_dataset_idx
+            #elif (isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear)) and counter == id:
+            #    counter += 1                    
+            #    self.current_masks[module_idx] = torch.zeros(module.weight.data.size()) + self.current_dataset_idx
 
     def make_grads_zero(self):
         """Sets grads of fixed weights to 0."""
@@ -187,7 +194,7 @@ class SparsePruner(object):
         return biases
 
 
-    def make_weights_random(self, id=-1, mode=True):
+    def make_weights_random(self):
         assert self.previous_masks
 
         #self.masks[self.current_dataset_idx] = self.previous_masks
@@ -201,8 +208,7 @@ class SparsePruner(object):
 
                 k = np.count_nonzero(mask.eq(self.current_dataset_idx).cpu().numpy().flatten())
 
-                if id != counter and mode == True:
-                    weight[mask.eq(self.current_dataset_idx)] = 1-2*torch.rand(k).cuda()
+                weight[mask.eq(self.current_dataset_idx)] = 1-2*torch.rand(k).cuda()
 
                 #mask[mask.eq(0)] = self.current_dataset_idx
                 

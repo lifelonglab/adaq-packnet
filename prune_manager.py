@@ -1,5 +1,5 @@
 import torch.nn as nn
-from prune_clean import SparsePruner
+from pruner import SparsePruner
 import numpy as np
 from tqdm import tqdm
 from torch.autograd import Variable
@@ -9,7 +9,7 @@ import torch
 
 class Manager(object):
 
-    def __init__(self, args, model, previous_masks, dataset2idx, dataset2biases, masks=None):
+    def __init__(self, args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=None, masks=None):
         self.args = args
         self.cuda = args.cuda
         self.model = model
@@ -19,8 +19,8 @@ class Manager(object):
 
         self.criterion = nn.CrossEntropyLoss()
 
-        self.pruner = SparsePruner(self.model, self.args.prune_perc_per_layer, previous_masks, self.args.train_biases, self.args.train_bn, dataset2idx)
-        self.pruner.masks = masks
+        self.pruner = SparsePruner(self.model, prune_perc_per_layer, previous_masks, self.args.train_biases, self.args.train_bn, dataset2idx)
+        self.pruner.ticket_masks = masks
 
 
     def eval(self, test_loader, dataset_idx, biases=None, copy_train=False, cv=None):
@@ -148,12 +148,13 @@ class Manager(object):
     def train(self, train_loader, test_loader, epochs, optimizer, save=True, directory='', filename='checkpoint.pt', best_accuracy=0.0):
         """Performs training."""
         best_accuracy = best_accuracy
+        error_history = []
 
         if self.args.cuda:
             self.model = self.model.cuda()
 
         for epoch in range(epochs):
-            print('Epoch: %d' % (epoch_idx))
+            print('Epoch: %d' % (epoch))
             
             self.model.train()
             
@@ -163,7 +164,7 @@ class Manager(object):
             accuracy = 100 - errors[0]  # Top-1 accuracy. 
 
             # Save performance history and stats.
-            with open(savename + '.json', 'w') as fout:
+            with open(filename + '.json', 'w') as fout:
                 json.dump({
                     'error_history': error_history,
                     'args': vars(self.args),
