@@ -1,3 +1,3 @@
-# header AdaQPacknet algorithm
+# AdaQPacknet algorithm
 
 Basic code for AdaQPacknet Continual Learning Strategy
