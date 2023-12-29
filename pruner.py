@@ -12,7 +12,7 @@ import copy
 class SparsePruner(object):
     """Performs pruning on the given model."""
 
-    def __init__(self, model, prune_perc, previous_masks, train_bias, train_bn, dataset2idx):
+    def __init__(self, model, prune_perc, previous_masks, train_bias, train_bn, dataset2idx, capacity=None):
         self.model = model
         
         self.prune_perc = prune_perc
@@ -37,6 +37,7 @@ class SparsePruner(object):
         
         self.current_dataset_idx = dataset2idx #previous_masks[valid_key].max()
         self.masks[self.current_dataset_idx] = previous_masks
+        self.capacity = capacity
    
     def set_model_copy():
        for module_idx, module in enumerate(self.model_copy.modules()):
@@ -45,7 +46,7 @@ class SparsePruner(object):
                 module.weight.data[self.previous_masks[module_idx].lt(self.current_dataset_idx)] = 0.0
                               
 
-    def pruning_mask(self, weights, previous_mask, layer_idx, mask_=None, capacity=None):
+    def pruning_mask(self, weights, previous_mask, layer_idx, mask_=None, bit_width=None):
         """Ranks weights by magnitude. Sets all below kth to 0.
            Returns pruned mask.
         """
@@ -53,7 +54,8 @@ class SparsePruner(object):
         previous_mask = previous_mask.cuda()
         
         
-        tensor = weights[previous_mask.eq(self.current_dataset_idx) | previous_mask.eq(0)]
+        #tensor = weights[previous_mask.eq(self.current_dataset_idx) | previous_mask.eq(0)]
+        tensor = weights[(self.capacity[layer_idx] < 32-bit_width[layer_idx]).cuda().byte()]
         abs_tensor = tensor.abs()
 
         #first train       
@@ -66,10 +68,13 @@ class SparsePruner(object):
 
                 # Remove those weights which are below cutoff and belong to current
                 # dataset that we are training for.
-                remove_mask = weights.abs().le(cutoff_value.cuda()) * previous_mask.eq(self.current_dataset_idx)
+                remove_mask = weights.abs().le(cutoff_value.cuda()) * (self.capacity[layer_idx] < 32-bit_width[layer_idx]).cuda().byte()
+                #remove_mask = weights.abs().le(cutoff_value.cuda()) * previous_mask.eq(self.current_dataset_idx)
 
                 # mask = 1 - remove_mask
                 previous_mask[remove_mask.eq(1)] = 0
+                previous_mask[(self.capacity[layer_idx]>=32-bit_width[layer_idx]).cuda().byte()] = 0
+                
         else:
             #import pdb
             #pdb.set_trace()
@@ -85,7 +90,7 @@ class SparsePruner(object):
         return mask
 
     
-    def prune(self, capacity=None):
+    def prune(self, bit_width):
         """Gets pruning mask for each layer, based on previous_masks.
            Sets the self.current_masks to the computed pruning masks.
         """
@@ -107,9 +112,9 @@ class SparsePruner(object):
                     #import pdb
                     #pdb.set_trace()
                     #mask__ = cmasks[module_idx] #mask_[str(counter)]                   
-                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=self.ticket_masks[module_idx], capacity=capacity)
+                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=self.ticket_masks[module_idx], bit_width=bit_width)
                 else:                 
-                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, capacity=capacity)
+                    mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, bit_width=bit_width)
                 
                 self.current_masks[module_idx] = mask.cuda()
 
@@ -218,7 +223,7 @@ class SparsePruner(object):
         #self.previous_masks = self.current_masks
 
 
-    def make_finetuning_mask(self, id=-1):
+    def make_finetuning_mask(self, bit_width=None):
         """Turns previously pruned weights into trainable weights for
            current dataset.
         """
@@ -233,21 +238,19 @@ class SparsePruner(object):
         for module_idx, module in enumerate(self.model.modules()):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                 weight = module.weight.data
+               
+                mask = self.current_masks[module_idx]
 
-                if id != counter: 
-                    mask = self.current_masks[module_idx]
+                #k = np.count_nonzero(mask.eq(0).cpu().numpy().flatten())
+                #weight[mask.eq(0)] = 1-2*torch.rand(k).cuda()
+                k = np.count_nonzero(((self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()).cpu().numpy().flatten())
+                weight[(self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()] = 1-2*torch.rand(k).cuda()
 
-                    k = np.count_nonzero(mask.eq(0).cpu().numpy().flatten())
-                    weight[mask.eq(0)] = 1-2*torch.rand(k).cuda()
-
-                    mask[mask.eq(0)] = self.current_dataset_idx
+                #mask[mask.eq(0)] = self.current_dataset_idx
+                mask[(self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()] = self.current_dataset_idx
                 
-                    self.current_masks[module_idx] = mask
-                else:
-                    mask = self.current_masks[module_idx]
-                    mask[mask.eq(self.current_dataset_idx-1)] = self.current_dataset_idx
-                
-                    self.current_masks[module_idx] = mask
+                self.current_masks[module_idx] = mask
                     
                 counter += 1
+                self.capacity[module_idx] += bit_width[module_idx]
         return counter

@@ -26,6 +26,7 @@ import torchvision
 import torchvision.transforms as transforms
 import random
 import os
+import math
 
 from prune_helper import compute_average_sparsity
 from prune_helper import compute_average_sparsity_by_percentage
@@ -89,6 +90,9 @@ FLAGS.add_argument('--checkpoint', type=str, default='checkpoint.pt',
 FLAGS.add_argument('--prune_method', type=str,
                    choices=['lottery_ticket', 'lottery_ticket_search', 'fine_tuning', 'dynamic_mask', 'dynamic_mask_search'],
                    help='Pruning method to use')
+FLAGS.add_argument('--prune_strategy', type=str,
+                   choices=['random', 'maximize_from_previous_task'],
+                   help='Pruning strategy to use')
 FLAGS.add_argument('--prune_perc_per_layer', type=float, default=0.6,
                    help='% of neurons to prune per layer')
 FLAGS.add_argument('--disable_pruning_mask', action='store_true', default=False,
@@ -103,6 +107,7 @@ FLAGS.add_argument('--population_size', type=int, default=2)
 FLAGS.add_argument('--quantization_method', type=str,
                    choices=['nonlinear'],
                    help='Pruning method to use')
+FLAGS.add_argument('--bit_width', type=int, default=8)
 FLAGS.add_argument('--cuda', action='store_true', default=False,
                    help='use CUDA')
 FLAGS.add_argument('--init_dump', action='store_true', default=False,
@@ -141,7 +146,7 @@ def set_weights_by_mask(mask, net):
     return net
 
 
-def init_mask(model, layers, percentage, previous_masks, task_id):
+def init_mask(model, layers, percentage, previous_masks, task_id, capacity, bit_width):
     counter = 0
     state_dict = model.state_dict()
     mask_ = {}
@@ -154,8 +159,9 @@ def init_mask(model, layers, percentage, previous_masks, task_id):
                 
                 #import pdb
                 #pdb.set_trace()
-                idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
-                idxs = idxs.numpy()
+                #idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
+                idxs = (capacity[module_idx]<=32-bit_width[module_idx]).flatten().cuda().byte().nonzero()
+                idxs = idxs.cpu().numpy()
 
                 mask_[counter] = np.ones((sz[0], sz[1], sz[2], sz[3]))
 
@@ -167,14 +173,16 @@ def init_mask(model, layers, percentage, previous_masks, task_id):
                 mask_[counter] = torch.from_numpy(np.reshape(mask_[counter], (sz[0], sz[1], sz[2], sz[3])))
 
             if (len(sz) == 2):
-                idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
-                idxs = idxs.numpy()
+                #idxs = (previous_masks[counter].flatten() == task_id+1).nonzero()
+                idxs = (capacity[module_idx]<=32-bit_width[module_idx]).flatten().cuda().byte().nonzero()
+                idxs = idxs.cpu().numpy()
 
                 mask_[counter] = np.ones((sz[0], sz[1]))
 
                 #elem = np.random.choice(mask_[counter].size, int(percentage[counter]*mask_[counter].size), replace=False)
                 elem = np.random.choice(idxs.size, int(percentage[counter]*idxs.size), replace=False)
                 mask_[counter] = mask_[counter].flatten()
+
                 mask_[counter][idxs[elem]] = 0.0
                 mask_[counter] = torch.from_numpy(np.reshape(mask_[counter], (sz[0], sz[1])))
         counter = counter + 1
@@ -284,20 +292,26 @@ def init_dump(arch, args):
 
     previous_masks = {}
     masks = {}
+    capacity = {}
+    bit_width = {}
 
     for module_idx, module in enumerate(model.modules()):
         if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
             mask = torch.ByteTensor(module.weight.data.size()).fill_(1)
+            weights_capacity = torch.Tensor(module.weight.data.size()).fill_(0)
+
             if 'cuda' in module.weight.data.type():
                 mask = mask.cuda()
             previous_masks[module_idx] = mask
-            
-
+            capacity[module_idx] = weights_capacity
+            bit_width[module_idx] = args.bit_width
     
     torch.save({
         'dataset2idx': 1,
         'previous_masks': previous_masks,
         'model': model,
+        'capacity': capacity,
+        'bit_width': bit_width,
     }, args.save_prefix + args.initname) #% (arch))
 
 
@@ -314,9 +328,8 @@ def main():
     ckpt = torch.load(args.save_prefix + args.loadname) 
     model = ckpt['model']
     model.cuda()
-
-    #import pdb
-    #pdb.set_trace()
+    capacity = ckpt['capacity']
+    bit_width = ckpt['bit_width']
    
     previous_masks = ckpt['previous_masks']
     dataset2idx = ckpt['dataset2idx']
@@ -325,6 +338,8 @@ def main():
         dataset2biases = ckpt['dataset2biases']
     else:
         dataset2biases = {}
+
+    #take batch norms from previous model
    
     if args.dataset == 'CIFAR100' or args.dataset == 'permMNIST' or args.dataset == 'splitMNIST':
         (train_datasets, test_datasets), config, classes_per_task = get_multitask_experiment(name=args.dataset, scenario='class', tasks=10, data_dir='./store/datasets', normalize=False, augment=False, verbose=True, exception=False, only_test=False)
@@ -471,8 +486,8 @@ def main():
                     layers[module_idx] = counter
                 
                     counter += 1
-            mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
-            
+            mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id, capacity, bit_width)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t, capacity=capacity, bit_width=bit_width)
 
         if args.prune_method == 'lottery_ticket_search':
 
@@ -500,10 +515,10 @@ def main():
                 
                         counter += 1
 
-                mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
+                mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id, capacity, bit_width)
 
                 model_c = copy.deepcopy(model)
-                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, masks=mask_t)
+                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
                 manager.pruner.current_masks = copy.deepcopy(previous_masks)
                 manager.pruner.make_weights_random()
             
@@ -525,7 +540,7 @@ def main():
             id_ = np.argmax(fitness)
  
             mask_t = init_mask(model, layers, sparsities[id_], previous_masks, args.task_id)
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t, capacity=capacity, bit_width=bit_width)
 
 
         if args.prune_method == 'dynamic_mask_search':
@@ -555,7 +570,7 @@ def main():
                 #mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id)
 
                 model_c = copy.deepcopy(model)
-                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None)
+                manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None, capacity=capacity, bit_width=bit_width)
                 manager.pruner.current_masks = copy.deepcopy(previous_masks)
                 manager.pruner.make_weights_random()
             
@@ -577,7 +592,7 @@ def main():
             id_ = np.argmax(fitness)
  
             #mask_t = init_mask(model, layers, sparsities, previous_masks, args.task_id)
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=sparsities[id_], masks=None)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=sparsities[id_], masks=None, capacity=capacity, bit_width=bit_width)
 
 
         if args.mode == 'quantize_and_prune':
@@ -597,7 +612,7 @@ def main():
             manager.train(train_loader, val_loader, args.epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
             errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)           
         
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks)
+            #manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks, capacity=capacity, bit_width=bit_width)
             manager.pruner.current_masks = copy.deepcopy(previous_masks)
 
             #manager.train(train_loader, val_loader, 8, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
@@ -607,8 +622,10 @@ def main():
             clusters = 64
             
             while (100 - errors_[0]) - (100 - errors[0]):
+
+                #init capacity
                 model_ = copy.deepcopy(model)
-                manager = Manager(args, model_, previous_masks, dataset2idx, dataset2biases, train_, test_, masks)
+                manager = Manager(args, model_, previous_masks, dataset2idx, dataset2biases, train_, test_, masks, capacity=capacity, bit_width=bit_width)
                 for module_idx, module in enumerate(manager.model.modules()):
                     if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                         new_weight = module.weight.data*(manager.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float()
@@ -631,8 +648,9 @@ def main():
             import pdb
             pdb.set_trace()
 
-            manager.pruner.make_finetuning_mask()     
+            manager.pruner.make_finetuning_mask(bit_width=math.log(clusters, 2))     
             errors = manager.eval(manager.pruner.current_dataset_idx-1)
+            #get batch norms and save
             model_bp = copy.deepcopy(manager.model)
      
         elif args.mode == 'eval':     

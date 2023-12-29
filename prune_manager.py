@@ -1,5 +1,5 @@
 import torch.nn as nn
-from pruner import SparsePruner
+from prune_clean import SparsePruner
 import numpy as np
 from tqdm import tqdm
 from torch.autograd import Variable
@@ -9,7 +9,7 @@ import torch
 
 class Manager(object):
 
-    def __init__(self, args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=None, masks=None):
+    def __init__(self, args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=None, masks=None, capacity=None, bit_width=None):
         self.args = args
         self.cuda = args.cuda
         self.model = model
@@ -19,8 +19,9 @@ class Manager(object):
 
         self.criterion = nn.CrossEntropyLoss()
 
-        self.pruner = SparsePruner(self.model, prune_perc_per_layer, previous_masks, self.args.train_biases, self.args.train_bn, dataset2idx)
+        self.pruner = SparsePruner(self.model, prune_perc_per_layer, previous_masks, self.args.train_biases, self.args.train_bn, dataset2idx, capacity=capacity)
         self.pruner.ticket_masks = masks
+        self.bit_width = bit_width
 
 
     def eval(self, test_loader, dataset_idx, biases=None, copy_train=False, cv=None):
@@ -83,7 +84,7 @@ class Manager(object):
         # Set fixed param grads to 0.
         if not self.args.disable_pruning_mask:
             self.pruner.make_grads_zero()
-            self.pruner.prune()
+            self.pruner.prune(bit_width=self.bit_width)
 
         optimizer.step()
         
@@ -96,18 +97,18 @@ class Manager(object):
         #    net = set_weights_by_mask(net, net)
             
 
-    def copy_batchnorm(self, model_1, model_2):
-        for module_1, module_2 in zip(model_1.modules(), model_2.modules()):
-            if isinstance(module_1, nn.BatchNorm2d):
-                module_2.running_var = module_1.running_var
-                module_2.running_mean = module_1.running_mean
+    #def copy_batchnorm(self, model_1, model_2):
+    #    for module_1, module_2 in zip(model_1.modules(), model_2.modules()):
+    #        if isinstance(module_1, nn.BatchNorm2d):
+    #            module_2.running_var = module_1.running_var
+    #            module_2.running_mean = module_1.running_mean
 
 
-    def apply_batchnorm(self, dataset_idx):
-        batchnorms = self.batchnorms[dataset_idx]
-        for module_idx, module in zip(model.modules()):
-            if isinstance(module, nn.BatchNorm2d):
-                model.modules()[module_idx] = batchnorms[module_idx]
+    #def apply_batchnorm(self, dataset_idx):
+    #    batchnorms = self.batchnorms[dataset_idx]
+    #    for module_idx, module in zip(model.modules()):
+    #        if isinstance(module, nn.BatchNorm2d):
+    #            model.modules()[module_idx] = batchnorms[module_idx]
 
     def do_epoch(self, train_loader, epoch_idx, optimizer):
         """Trains model for one epoch."""
@@ -115,7 +116,7 @@ class Manager(object):
         for batch, label in tqdm(train_loader, desc='Epoch: %d ' % (epoch_idx)):
             self.do_batch(optimizer, batch, label)                         
 
-    def save_model(self, epoch, best_accuracy, errors, directory, checkpoint_name):
+    def save_model(self, epoch, best_accuracy, errors, directory, checkpoint_name, capacity=None, batch_norms=None):
         """Saves model to file."""
         base_model = self.model
 
@@ -137,6 +138,7 @@ class Manager(object):
             'previous_masks': self.pruner.current_masks,
             'masks': self.pruner.masks,
             'model': base_model,
+            'capacity': capacity,
         }
         if self.args.train_biases:
             ckpt['dataset2biases'] = self.dataset2biases
@@ -145,7 +147,7 @@ class Manager(object):
         torch.save(ckpt, directory+checkpoint_name)
 
 
-    def train(self, train_loader, test_loader, epochs, optimizer, save=True, directory='', filename='checkpoint.pt', best_accuracy=0.0):
+    def train(self, train_loader, test_loader, epochs, optimizer, save=True, directory='', filename='checkpoint.pt', best_accuracy=0.0, capacity=None):
         """Performs training."""
         best_accuracy = best_accuracy
         error_history = []
@@ -175,7 +177,8 @@ class Manager(object):
                 print('Best model so far, Accuracy: %0.2f%% -> %0.2f%%' %
                       (best_accuracy, accuracy))
                 best_accuracy = accuracy
-                self.save_model(epoch, best_accuracy, errors, directory, filename)
+                #get batch norms
+                self.save_model(epoch, best_accuracy, errors, directory, filename, capacity=capacity)
 
         print('Finished finetuning...')
         print('Best error/accuracy: %0.2f%%, %0.2f%%' %
