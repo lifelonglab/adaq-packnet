@@ -139,6 +139,7 @@ class Manager(object):
             'masks': self.pruner.masks,
             'model': base_model,
             'capacity': capacity,
+            'batchnorms': batch_norms,
         }
         if self.args.train_biases:
             ckpt['dataset2biases'] = self.dataset2biases

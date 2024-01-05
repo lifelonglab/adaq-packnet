@@ -31,6 +31,7 @@ import math
 from prune_helper import compute_average_sparsity
 from prune_helper import compute_average_sparsity_by_percentage
 from prune_helper import compute_size
+from prune_helper import get_batchnorms
 from non_linear_quantization import vquant
 from prune_helper import set_weights_by_mask, init_population
 from prune_manager import Manager
@@ -51,7 +52,7 @@ FLAGS.add_argument('--num_outputs', type=int, default=10,
                    help='Num outputs for dataset')
 
 # Optimization options.
-FLAGS.add_argument('--lr', type=float, default=0.01,
+FLAGS.add_argument('--lr', type=float, default=0.001,
                    help='Learning rate')
 FLAGS.add_argument('--lr_decay_every', type=int,
                    help='Step decay every this many epochs')
@@ -293,7 +294,7 @@ def init_dump(arch, args):
     previous_masks = {}
     masks = {}
     capacity = {}
-    bit_width = {}
+    #bit_width = {}
 
     for module_idx, module in enumerate(model.modules()):
         if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
@@ -304,7 +305,7 @@ def init_dump(arch, args):
                 mask = mask.cuda()
             previous_masks[module_idx] = mask
             capacity[module_idx] = weights_capacity
-            bit_width[module_idx] = args.bit_width
+    bit_width = args.bit_width
     
     torch.save({
         'dataset2idx': 1,
@@ -486,8 +487,12 @@ def main():
                     layers[module_idx] = counter
                 
                     counter += 1
+
             mask_t = init_mask(model, layers, percentage, previous_masks, args.task_id, capacity, bit_width)
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t, capacity=capacity, bit_width=bit_width)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
+  
+            params_to_optimize = manager.model.parameters()
+            optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
         if args.prune_method == 'lottery_ticket_search':
 
@@ -499,8 +504,6 @@ def main():
 
             fitness = []
             masks_list = []
-            #import pdb
-            #pdb.set_trace()
 
             for solution_id in range(args.population_size):
                 layers = {}
@@ -534,15 +537,33 @@ def main():
                 a_sparsities.append(1.0-(sz+sz_before)/size)
                 fitness.append([0.8*(100.0-errors[0])/100.0+0.2*(1.0-(sz+sz_before)/size)])
                             
-            import pdb
-            pdb.set_trace()
             #choose best
             id_ = np.argmax(fitness)
  
-            mask_t = init_mask(model, layers, sparsities[id_], previous_masks, args.task_id)
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, mask_t, capacity=capacity, bit_width=bit_width)
+            mask_t = init_mask(model, layers, sparsities[id_], previous_masks, args.task_id, capacity, bit_width)
+            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
 
+            params_to_optimize = manager.model.parameters()
+            optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
+      
+        if args.prune_method == 'dynamic_mask':
+            
+            #manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=sparsities[id_], masks=None, capacity=capacity, bit_width=bit_width) 
+            for module_idx, module in enumerate(model.modules()):
+                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                    prune_perc_per_layer[module_idx] = args.V_min + random.random()*(args.V_max-args.V_min)
+                    layers[module_idx] = counter
+                
+                    counter += 1
 
+            model_c = copy.deepcopy(model)
+            manager = Manager(args, model_c, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None, capacity=capacity, bit_width=bit_width)
+            manager.pruner.current_masks = copy.deepcopy(previous_masks)
+            manager.pruner.make_weights_random()
+            
+            params_to_optimize = manager.model.parameters()
+            optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
+ 
         if args.prune_method == 'dynamic_mask_search':
 
             sparsities = []
@@ -586,14 +607,17 @@ def main():
                 a_sparsities.append(sz/size)
                 fitness.append([0.8*(100.0-errors[0])/100.0+0.2*sz/size])
                             
-            import pdb
-            pdb.set_trace()
+            #import pdb
+            #pdb.set_trace()
             #choose best
             id_ = np.argmax(fitness)
  
             #mask_t = init_mask(model, layers, sparsities, previous_masks, args.task_id)
+            prune_perc_per_layer=sparsities[id_]
             manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=sparsities[id_], masks=None, capacity=capacity, bit_width=bit_width)
-
+          
+            params_to_optimize = manager.model.parameters()
+            optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
         if args.mode == 'quantize_and_prune':
         
@@ -604,32 +628,40 @@ def main():
 
             manager.pruner.current_masks = copy.deepcopy(previous_masks)
             ##manager.pruner.make_weights_random()
-            
 
             params_to_optimize = manager.model.parameters()
             optimizer = optim.Adam(params_to_optimize, lr=args.lr, betas=(0.9,0.999), eps=1e-08, weight_decay=0.001, amsgrad=False)
 
-            manager.train(train_loader, val_loader, args.epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
-            errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)           
+            manager.train(train_loader, val_loader, args.epochs, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint)
+            errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)     
         
             #manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks, capacity=capacity, bit_width=bit_width)
             manager.pruner.current_masks = copy.deepcopy(previous_masks)
 
-            #manager.train(train_loader, val_loader, 8, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint, prune=True)
+            #manager.train(train_loader, val_loader, 8, optimizer, save=True, directory=args.save_prefix, filename=args.checkpoint)
             errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
             
             errors_ = errors
             clusters = 64
+            last = {}
             
-            while (100 - errors_[0]) - (100 - errors[0]):
+            while abs((100 - errors_[0]) - (100 - errors[0])) < 2.0:
 
                 #init capacity
                 model_ = copy.deepcopy(model)
-                manager = Manager(args, model_, previous_masks, dataset2idx, dataset2biases, train_, test_, masks, capacity=capacity, bit_width=bit_width)
+
+                if args.mode == 'lottery_ticket' or args.mode == 'lottery_ticket_search':
+                    manager = Manager(args, model_, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
+                    manager.pruner.current_masks = copy.deepcopy(previous_masks)
+
+                if args.mode == 'dynamic_mask' or args.mode == 'dynamic_mask_search':
+                    manager = Manager(args, model_, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None, capacity=capacity, bit_width=bit_width)
+                    manager.pruner.current_masks = copy.deepcopy(previous_masks)                
+
                 for module_idx, module in enumerate(manager.model.modules()):
                     if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                        new_weight = module.weight.data*(manager.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float()
-                        other_weights = module.weight.data*(manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx).float()
+                        new_weight = module.weight.data*(manager.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float().cuda()
+                        other_weights = module.weight.data*(manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx).float().cuda()
 
                         q_weight, values, labels = vquant(new_weight, n_clusters=clusters)                 
                         q_weight = torch.from_numpy(q_weight).cuda()                
@@ -637,20 +669,57 @@ def main():
                         q_weight[manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx] = 0
                         labels[manager.pruner.current_masks[module_idx].cpu().numpy() != manager.pruner.current_dataset_idx] = -1
 
-                        new_weight = q_weight*(manager.pruner.current_masks[module_idx] == (manager.pruner.current_dataset_idx)).float()
+                        new_weight = q_weight*(manager.pruner.current_masks[module_idx] == (manager.pruner.current_dataset_idx)).float().cuda()
                         module.weight.data = new_weight + other_weights
-
-                clusters = clusters // 2 
+                        
                 errors_ = manager.eval(val_loader, manager.pruner.current_dataset_idx)
-                del manager
 
-            #set best quant
+                if abs((100 - errors_[0]) - (100 - errors[0])) < 2.0:
+                    for module_idx, module in enumerate(manager.model.modules()):
+                        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                            last[module_idx] = module.weight.data 
+
+                print(clusters)
+                clusters = clusters // 2
+
+                #del manager
+
+            if args.mode == 'lottery_ticket' or args.mode == 'lottery_ticket_search':
+                manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
+                manager.pruner.current_masks = copy.deepcopy(previous_masks)
+
+            if args.mode == 'dynamic_mask' or args.mode == 'dynamic_mask_search':
+                manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None, capacity=capacity, bit_width=bit_width)
+                manager.pruner.current_masks = copy.deepcopy(previous_masks)
+
             import pdb
             pdb.set_trace()
+            #set best quant
+            for module_idx, module in enumerate(manager.model.modules()):
+                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                    #new_weight = module.weight.data*(manager.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float().cuda()
+                    #other_weights = module.weight.data*(manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx).float().cuda()
 
-            manager.pruner.make_finetuning_mask(bit_width=math.log(clusters, 2))     
-            errors = manager.eval(manager.pruner.current_dataset_idx-1)
+                    #q_weight, values, labels = vquant(new_weight, n_clusters=clusters*4)                 
+                    #q_weight = torch.from_numpy(q_weight).cuda()                
+                
+                    #q_weight[manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx] = 0
+                    #labels[manager.pruner.current_masks[module_idx].cpu().numpy() != manager.pruner.current_dataset_idx] = -1
+
+                    #new_weight = q_weight*(manager.pruner.current_masks[module_idx] == (manager.pruner.current_dataset_idx)).float().cuda()
+                    module.weight.data = last[module_idx]
+
+            errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
+            manager.pruner.make_finetuning_mask(bit_width=math.log(clusters*4, 2))     
+            #errors = manager.eval(val_loader, manager.pruner.current_dataset_idx-1)
             #get batch norms and save
+            #get batch norms
+            
+            batchnorms = get_batchnorms(manager.model)
+            import pdb
+            pdb.set_trace()
+            manager.save_model(args.epochs, 0.0, errors, directory=args.save_prefix, filename=args.checkpoint, capacity=capacity, batch_norms=batchnorms)
+
             model_bp = copy.deepcopy(manager.model)
      
         elif args.mode == 'eval':     

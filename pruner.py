@@ -61,6 +61,7 @@ class SparsePruner(object):
         #first train       
 
         if mask_ is None:
+            
             if self.prune_perc_[layer_idx] > 0:
                 cutoff_rank = round(self.prune_perc_[layer_idx] * tensor.numel())
                 #cutoff_rank = round(self.prune_perc * tensor.numel())
@@ -243,14 +244,15 @@ class SparsePruner(object):
 
                 #k = np.count_nonzero(mask.eq(0).cpu().numpy().flatten())
                 #weight[mask.eq(0)] = 1-2*torch.rand(k).cuda()
-                k = np.count_nonzero(((self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()).cpu().numpy().flatten())
-                weight[(self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()] = 1-2*torch.rand(k).cuda()
+                k = np.count_nonzero(((self.capacity[module_idx]<32-bit_width).cuda().byte()).cpu().numpy().flatten())
+                weight[(self.capacity[module_idx]<32-bit_width).cuda().byte()] = 1-2*torch.rand(k).cuda()
+
 
                 #mask[mask.eq(0)] = self.current_dataset_idx
-                mask[(self.capacity[module_idx]<32-bit_width[layer_idx]).cuda().byte()] = self.current_dataset_idx
+                mask[(self.capacity[module_idx]<32-bit_width).cuda().byte()] = self.current_dataset_idx
                 
                 self.current_masks[module_idx] = mask
                     
                 counter += 1
-                self.capacity[module_idx] += bit_width[module_idx]
+                self.capacity[module_idx] += bit_width
         return counter

@@ -154,7 +154,7 @@ def copy_batchnorm(model_1, model_2):
 
 def get_batchnorms(model):
     batch_norms = {}
-    for module_idx, module in model.modules():
+    for module_idx, module in enumerate(model.modules()):
         if isinstance(module, nn.BatchNorm2d):
             batch_norms[str(module_idx)+'_var'] = module.running_var
             batch_norms[str(module_idx)+'_mean'] = module.running_mean

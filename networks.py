@@ -29,6 +29,97 @@ from torch import nn
 from torch.nn.functional import relu
 
 
+## Define ResNet18 model
+def compute_conv_output_size(Lin,kernel_size,stride=1,padding=0,dilation=1):
+    return int(np.floor((Lin+2*padding-dilation*(kernel_size-1)-1)/float(stride)+1))
+
+def conv3x3(in_planes, out_planes, stride=1):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+def conv7x7(in_planes, out_planes, stride=1):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=7, stride=stride,
+                     padding=1, bias=False)
+
+class GPMBasicBlock(nn.Module):
+    expansion = 1
+    def __init__(self, in_planes, planes, stride=1):
+        super(GPMBasicBlock, self).__init__()
+        self.conv1 = conv3x3(in_planes, planes, stride)
+        self.bn1 = nn.BatchNorm2d(planes, track_running_stats=False)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes, track_running_stats=False)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != self.expansion * planes:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1,
+                          stride=stride, bias=False),
+                nn.BatchNorm2d(self.expansion * planes, track_running_stats=False)
+            )
+        self.act = OrderedDict()
+        self.count = 0
+
+    def forward(self, x):
+        self.count = self.count % 2 
+        self.act['conv_{}'.format(self.count)] = x
+        self.count +=1
+        out = relu(self.bn1(self.conv1(x)))
+        self.count = self.count % 2 
+        self.act['conv_{}'.format(self.count)] = out
+        self.count +=1
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = relu(out)
+        return out
+
+
+class GPMResNet(nn.Module):
+    def __init__(self, block, num_blocks, taskcla):
+        super(GPMResNet, self).__init__()
+        self.in_planes = nf
+        self.conv1 = conv3x3(3, nf * 1, 1)
+        self.bn1 = nn.BatchNorm2d(nf * 1, track_running_stats=False)
+        self.layer1 = self._make_layer(block, nf * 1, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, nf * 2, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, nf * 4, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, nf * 8, num_blocks[3], stride=2)
+        self.layer5 = nn.Linear(nf * 8 * block.expansion * 4, 10, bias=False)
+
+        #self.taskcla = taskcla
+        #self.linear=torch.nn.ModuleList()
+        #for t, n in self.taskcla:
+        #    self.linear.append(nn.Linear(nf * 8 * block.expansion * 4, n, bias=False))
+        self.act = OrderedDict()
+
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        bsz = x.size(0)
+        self.act['conv_in'] = x.view(bsz, 3, 32, 32)
+        out = relu(self.bn1(self.conv1(x.view(bsz, 3, 32, 32)))) 
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = avg_pool2d(out, 2)
+        out = out.view(out.size(0), -1)
+        y = self.layer5(out)
+        #y=[]
+        #for t,i in self.taskcla:
+        #    y.append(self.linear[t](out))
+        return y
+
+
+def GPMResNet18(nf=32):
+    return GPMResNet(GPMBasicBlock, [2, 2, 2, 2])
+
+
 class SubnetAlexNet_norm(nn.Module):
     def __init__(self):
         super(SubnetAlexNet_norm, self).__init__()
@@ -208,17 +299,17 @@ class TinyNet(nn.Module):
         self.use_bn = use_bn
         self.last = []
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=160, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bn1 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.conv2 = nn.Conv2d(in_channels=160, out_channels=160, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bn2 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.conv3 = nn.Conv2d(in_channels=160, out_channels=160, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bn3 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.conv4 = nn.Conv2d(in_channels=160, out_channels=160, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn4 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bn4 = nn.BatchNorm2d(160, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.ln1 = nn.Linear(2560, 640)
-        self.bl1 = nn.BatchNorm1d(640, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bl1 = nn.BatchNorm1d(640, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.ln2 = nn.Linear(640, 640)
-        self.bl2 = nn.BatchNorm1d(640, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
+        #self.bl2 = nn.BatchNorm1d(640, eps=1e-05, momentum=0.1, track_running_stats=False, affine=False)
         self.ln3 = nn.Linear(640, outputs)
 
         #for i in range(tasks):
@@ -280,10 +371,45 @@ class VGG(nn.Module):
             x = self.features[i](x)
             sz = x.size()
 
+            #if isinstance(self.features[i], nn.Conv2d):
+            #    counter += 1
+            #    if counter == 2:
+            #        pdb.set_trace()
+                               
+
+            #x_ = x.clone().flatten()    
+
+            #topk = torch.topk(torch.abs(x_), int(0.3*x_.size()[0]))
+            #x_ = x.clone().flatten()
+            #x_[torch.abs(x_) < topk[0][-1]] = 0.0
+            #x_ = x_.view(sz[0], sz[1], sz[2], sz[3])
+
+            #x = x_
+
+            #if i in self.log_layers and id > -1 and self.error == 0:
+            #    np.save(str(id) + '_' + str(i) + '_vgg', x.cpu().numpy())
+            #if residual error - read file and compare in layers
+            #if self.error and id > -1:
+            #    if i in self.log_layers:
+            #        x_ = np.load(str(id) + '_' + str(i) + '_vgg.npy')
+            #        error = torch.from_numpy(x_).cuda() - x
+            #        np.save(str(id) + '_' + str(i) + '_vgg_error', error.cpu().numpy())
+            #        errors.append(error)
+
         out = x
+
+        #pdb.set_trace()
+        #layer by layer
         out = out.view(out.size(0), -1)
         out = self.classifier(out)
-        
+        #if id > -1 and self.error == 0:
+        #    np.save(str(id) + '_out_vgg', x.cpu().numpy())
+
+        #if self.error and id > -1: 
+        #    x_ = np.load(str(id) + '_out_vgg.npy')
+        #    error = torch.from_numpy(x_).cuda() - x
+        #    np.save(str(id) + '_out_vgg_error', error.cpu().numpy())
+        #    errors.append(error)
         return out
 
     def _make_layers(self, cfg):
@@ -324,17 +450,115 @@ class MLP(nn.Module):
         self.output_size = output_size
         self.lamda = lamda
 
+        #self.active_dendrite = []
+       
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        
+        # Layers.
+        #self.layers = nn.ModuleList([
+        #    # input
+        #    nn.Linear(self.input_size, self.hidden_size), nn.ReLU(),
+        #    nn.Dropout(self.input_dropout_prob),
+        #    # hidden
+        #    *((nn.Linear(self.hidden_size, self.hidden_size), nn.ReLU(),
+        #       nn.Dropout(self.hidden_dropout_prob)) * self.hidden_layer_num),
+        #    # output
+        #    nn.Linear(self.hidden_size, self.output_size)
+        #])
+
         self.ln1 = nn.Linear(self.input_size, self.hidden_size)
         self.r1 = nn.ReLU()
         self.d1 = nn.Dropout(self.input_dropout_prob)
+        #self.ln2 = nn.Linear(self.hidden_size, self.hidden_size)
+        #self.r2 = nn.ReLU()
+        #self.d2 = nn.Dropout(self.hidden_dropout_prob)
         self.ln3 = nn.Linear(self.hidden_size, self.output_size)
+
+        #self.conv1 = nn.Conv2d(1, 6, 5)
+        #self.relu1 = nn.ReLU()
+        
+        #self.pool1 = nn.MaxPool2d(2)
+        #self.conv2 = nn.Conv2d(6, 16, 5)
+        #self.relu2 = nn.ReLU()
+        
+        #self.pool2 = nn.MaxPool2d(2)
+        #self.fc1 = nn.Linear(256, 120)
+        #self.relu3 = nn.ReLU()
+        #self.fc2 = nn.Linear(120, 84)
+        #self.relu4 = nn.ReLU()
+        #self.fc3 = nn.Linear(84, 10)
+        #self.relu5 = nn.ReLU()
 
 
     def forward(self, x):
+
+        #pdb.set_trace()
         x = x.view(x.size(0), x.size(1)*x.size(2))
-        y = self.ln1(x)  
-        y = self.r1(y)   
-        y = self.ln3(y)  
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[0](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        y = self.ln1(x)
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j] 
+          
+        y = self.r1(y)
+
+        sz = y.size()
+        #y = y.flatten()    
+
+        #topk = torch.topk(torch.abs(y), int(0.2*y.flatten().size()[0]))
+        #y = y.flatten()
+        #y[torch.abs(y) < topk[0][-1]] = 0.0
+
+        #y = y.view(sz[0], sz[1])
+        #y = self.d1(y)
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[1](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.ln2(y)
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.r2(y)
+        #y = self.d2(y)
+
+        #pdb.set_trace()
+        #y = y.view(y.shape[0], -1)
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[2](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc1(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu3(y)
+  
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[3](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc2(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu4(y)
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[4](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc3(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu5(y)
+        y = self.ln3(y)
+        sz = y.size()
+        #y = y.flatten()    
+
+        #topk = torch.topk(torch.abs(y), int(0.7*y.flatten().size()[0]))
+        #y = y.flatten()
+        #y[torch.abs(y) < topk[0][-1]] = 0.0
+
+        #y = y.view(sz[0], sz[1])
+    
         return y
 
 
@@ -355,22 +579,61 @@ class MLP_(nn.Module):
         self.output_size = output_size
         self.lamda = lamda
 
+        #self.active_dendrite = []
+        #self.ln0 = nn.Linear(32*32*1, 10)
+        #self.active_dendrite.append(nn.Linear(32*32*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        #self.active_dendrite.append(nn.Linear(28*28*1, 10).cuda())
+        
+        # Layers.
+        #self.layers = nn.ModuleList([
+        #    # input
+        #    nn.Linear(self.input_size, self.hidden_size), nn.ReLU(),
+        #    nn.Dropout(self.input_dropout_prob),
+        #    # hidden
+        #    *((nn.Linear(self.hidden_size, self.hidden_size), nn.ReLU(),
+        #       nn.Dropout(self.hidden_dropout_prob)) * self.hidden_layer_num),
+        #    # output
+        #    nn.Linear(self.hidden_size, self.output_size)
+        #])
+
         self.ln1 = nn.Linear(self.input_size, self.hidden_size)
         self.r1 = nn.ReLU()
         self.d1 = nn.Dropout(self.input_dropout_prob)
+        #self.ln2 = nn.Linear(self.hidden_size, self.hidden_size)
+        #self.r2 = nn.ReLU()
+        #self.d2 = nn.Dropout(self.hidden_dropout_prob)
         self.ln3 = nn.Linear(self.hidden_size, self.output_size)
+
+        #self.conv1 = nn.Conv2d(1, 6, 5)
+        #self.relu1 = nn.ReLU()
+        
+        #self.pool1 = nn.MaxPool2d(2)
+        #self.conv2 = nn.Conv2d(6, 16, 5)
+        #self.relu2 = nn.ReLU()
+        
+        #self.pool2 = nn.MaxPool2d(2)
+        #self.fc1 = nn.Linear(256, 120)
+        #self.relu3 = nn.ReLU()
+        #self.fc2 = nn.Linear(120, 84)
+        #self.relu4 = nn.ReLU()
+        #self.fc3 = nn.Linear(84, 10)
+        #self.relu5 = nn.ReLU()
         self.ln4 = nn.Linear(32*32*1, 10)
 
 
     def forward(self, x, c=None):
 
+        #pdb.set_trace()
         if c is None:
             sigma = torch.sigmoid(torch.max(self.ln4(x.view(x.shape[0], x.shape[1]*x.shape[2])), dim=1)[0])
         else:
-            
+            #c = np.reshape(c, (1, c.shape[0], c.shape[1]))
             c = c.cuda()
             sigma = torch.sigmoid(torch.max(self.ln4(c.view(c.shape[0], c.shape[1]*c.shape[2])), dim=1)[0])
-        
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[0](x.view(x.shape[0], x.shape[1]*x.shape[2])), dim=1)[0])
         x = x.view(x.size(0), x.size(1)*x.size(2))
         
         y = self.ln1(x)
@@ -378,10 +641,60 @@ class MLP_(nn.Module):
             y[j,:] = y[j,:].clone()*sigma[j] 
           
         y = self.r1(y)
+
+        #sz = y.size()
+        #y = y.flatten()    
+
+        #topk = torch.topk(torch.abs(y), int(0.7*y.flatten().size()[0]))
+        #y = y.flatten()
+        #y[torch.abs(y) < topk[0][-1]] = 0.0
+
+        #y = y.view(sz[0], sz[1])
         y = self.d1(y)
-        
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[1](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.ln2(y)
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.r2(y)
+        #y = self.d2(y)
+
+        #pdb.set_trace()
+        #y = y.view(y.shape[0], -1)
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[2](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc1(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu3(y)
+  
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[3](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc2(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu4(y)
+
+        #sigma = torch.sigmoid(torch.max(self.active_dendrite[4](x.view(x.shape[0], x.shape[1]*x.shape[2]*x.shape[3])), dim=1)[0])
+        #y = self.fc3(y)
+
+        #for j in range(sigma.size(0)):
+        #    y[j,:] = y[j,:].clone()*sigma[j]
+
+        #y = self.relu5(y)
         y = self.ln3(y)
         sz = y.size()
+        #y = y.flatten()    
+
+        #topk = torch.topk(torch.abs(y), int(0.7*y.flatten().size()[0]))
+        #y = y.flatten()
+        #y[torch.abs(y) < topk[0][-1]] = 0.0
+
+        #y = y.view(sz[0], sz[1])
     
         return y
 
