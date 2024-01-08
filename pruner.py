@@ -55,7 +55,7 @@ class SparsePruner(object):
         
         
         #tensor = weights[previous_mask.eq(self.current_dataset_idx) | previous_mask.eq(0)]
-        tensor = weights[(self.capacity[layer_idx] < 32-bit_width[layer_idx]).cuda().byte()]
+        tensor = weights[(self.capacity[layer_idx] < 32-bit_width).cuda().byte()]
         abs_tensor = tensor.abs()
 
         #first train       
@@ -69,12 +69,12 @@ class SparsePruner(object):
 
                 # Remove those weights which are below cutoff and belong to current
                 # dataset that we are training for.
-                remove_mask = weights.abs().le(cutoff_value.cuda()) * (self.capacity[layer_idx] < 32-bit_width[layer_idx]).cuda().byte()
+                remove_mask = weights.abs().le(cutoff_value.cuda()) * (self.capacity[layer_idx] < 32-bit_width).cuda().byte()
                 #remove_mask = weights.abs().le(cutoff_value.cuda()) * previous_mask.eq(self.current_dataset_idx)
 
                 # mask = 1 - remove_mask
                 previous_mask[remove_mask.eq(1)] = 0
-                previous_mask[(self.capacity[layer_idx]>=32-bit_width[layer_idx]).cuda().byte()] = 0
+                previous_mask[(self.capacity[layer_idx]>=32-bit_width).cuda().byte()] = 0
                 
         else:
             #import pdb
