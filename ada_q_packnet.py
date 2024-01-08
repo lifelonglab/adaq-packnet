@@ -11,10 +11,10 @@ from torch.autograd import Variable
 from tqdm import tqdm
 
 import dataset
-import cl_networks as net
-import utils as utils
-from prune import SparsePruner
-from load import get_multitask_experiment
+import networks as net
+#import utils as utils
+from pruner import SparsePruner
+from data.load import get_multitask_experiment
 from torch.utils.data import DataLoader
 
 import torchvision.datasets as datasets
@@ -78,13 +78,13 @@ FLAGS.add_argument('--train_path', type=str, default='',
                    help='Location of train data')
 FLAGS.add_argument('--val_path', type=str, default='',
                    help='Location of test data')
-FLAGS.add_argument('--save_prefix', type=str, default='/work/packnet/checkpoints/',
+FLAGS.add_argument('--save_prefix', type=str, default='/home/ctonn/Work/checkpoints/',
                    help='Location to save model')
-FLAGS.add_argument('--loadname', type=str, default='cifar100_0.pt',
+FLAGS.add_argument('--loadname', type=str, default='alex_init.pt',
                    help='Location to save model')
-FLAGS.add_argument('--initname', type=str, default='cifar100_0.pt',
+FLAGS.add_argument('--initname', type=str, default='alex_init.pt',
                    help='Location to init model')
-FLAGS.add_argument('--checkpoint', type=str, default='checkpoint.pt',
+FLAGS.add_argument('--checkpoint', type=str, default='alex_0.pt',
                    help='Name of the checkpoint file')
 
 # Pruning options.
@@ -111,7 +111,7 @@ FLAGS.add_argument('--quantization_method', type=str,
 FLAGS.add_argument('--bit_width', type=int, default=8)
 FLAGS.add_argument('--cuda', action='store_true', default=False,
                    help='use CUDA')
-FLAGS.add_argument('--init_dump', action='store_true', default=False,
+FLAGS.add_argument('--init_dump', action='store_true', default=True,
                    help='Initial model dump.')
 FLAGS.add_argument('--task_number', type=int, default=10)
 FLAGS.add_argument('--task_id', type=int, default=0)

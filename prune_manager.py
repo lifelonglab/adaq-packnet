@@ -1,5 +1,5 @@
 import torch.nn as nn
-from prune_clean import SparsePruner
+from pruner import SparsePruner
 import numpy as np
 from tqdm import tqdm
 from torch.autograd import Variable
