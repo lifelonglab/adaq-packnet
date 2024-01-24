@@ -18,9 +18,6 @@ class SparsePruner(object):
         self.prune_perc = prune_perc
         self.prune_perc_ = {}
 
-        #import pdb
-        #pdb.set_trace()
-
         for module_idx, module in enumerate(self.model.modules()):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                 if prune_perc is not None:
@@ -77,8 +74,6 @@ class SparsePruner(object):
                 previous_mask[(self.capacity[layer_idx]>=32-bit_width).cuda().byte()] = 0
                 
         else:
-            #import pdb
-            #pdb.set_trace()
   
             #previous_mask[torch.from_numpy(mask_)==0] = 0
             previous_mask[mask_==0] = 0
@@ -109,10 +104,7 @@ class SparsePruner(object):
         #for module_idx, module in enumerate(self.model_copy.modules()):
         for module_idx, module in enumerate(self.model.modules()):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                if self.ticket_masks is not None:   
-                    #import pdb
-                    #pdb.set_trace()
-                    #mask__ = cmasks[module_idx] #mask_[str(counter)]                   
+                if self.ticket_masks is not None:                      
                     mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, mask_=self.ticket_masks[module_idx], bit_width=bit_width)
                 else:                 
                     mask = self.pruning_mask(module.weight.data, self.previous_masks[module_idx], module_idx, bit_width=bit_width)
@@ -134,16 +126,27 @@ class SparsePruner(object):
 
         for module_idx, module in enumerate(self.model.modules()):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                layer_mask = self.current_masks[module_idx]
+                if self.ticket_masks is None:
+                    layer_mask = self.current_masks[module_idx]
 
-                # Set grads of all weights not belonging to current dataset to 0.
-                if module.weight.grad is not None:
-                    module.weight.grad.data[layer_mask.cuda().ne(
-                        self.current_dataset_idx)] = 0
-                    if not self.train_bias:
-                        # Biases are fixed.
-                        if module.bias is not None:
-                            module.bias.grad.data.fill_(0)
+                    # Set grads of all weights not belonging to current dataset to 0.
+                    if module.weight.grad is not None:
+                        module.weight.grad.data[layer_mask.cuda().ne(self.current_dataset_idx)] = 0
+                        if not self.train_bias:
+                            # Biases are fixed.
+                            if module.bias is not None:
+                                module.bias.grad.data.fill_(0)
+                else:
+                    layer_mask = self.current_masks[module_idx]
+
+                    # Set grads of all weights not belonging to current dataset to 0.
+                    if module.weight.grad is not None:
+                        module.weight.grad.data[layer_mask.cuda().ne(1.0)] = 0
+                        if not self.train_bias:
+                            # Biases are fixed.
+                            if module.bias is not None:
+                                module.bias.grad.data.fill_(0)                    
+
             elif 'BatchNorm' in str(type(module)):
                 # Set grads of batchnorm params to 0.
                 if not self.train_bn:                       
@@ -156,39 +159,39 @@ class SparsePruner(object):
         counter = 0
 
         for module_idx, module in enumerate(self.model.modules()):
-            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):                 
-                layer_mask = self.current_masks[module_idx]
-                module.weight.data[layer_mask.eq(0)] = 0.0                                   
-        
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear): 
+                if self.ticket_masks is None:                
+                    layer_mask = self.current_masks[module_idx]
+                    module.weight.data[layer_mask.eq(0)] = 0.0 
+                else:                                  
+                    layer_mask = self.ticket_masks[module_idx]
+                    module.weight.data[layer_mask.eq(0)] = 0.0
+ 
 
-    def apply_mask(self, dataset_idx, copy_train=False):
+    def apply_mask(self, dataset_idx):
         """To be done to retrieve weights just for a particular dataset."""
-        if True:
-            for module_idx, module in enumerate(self.model.modules()):
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+       
+        for module_idx, module in enumerate(self.model.modules()):
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                if self.ticket_masks is None:
                     weight = module.weight.data
                     mask = self.previous_masks[module_idx]
                     weight[mask.gt(dataset_idx)] = 0.0
-        else:
-            for module_idx, module in enumerate(self.model_copy.modules()):
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                else:                  
                     weight = module.weight.data
-                    mask = self.previous_masks[module_idx]
-                    weight[mask.gt(dataset_idx)] = 0.0
+                    mask = self.ticket_masks[module_idx]
+                    weight[mask.ne(1.0)] = 0.0
+
+        
+    def restore_biases(self, biases):
+        """Use the given biases to replace existing biases."""
+        
+        for module_idx, module in enumerate(self.model.modules()):
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                if module.bias is not None:
+                    module.bias.data.copy_(biases[module_idx])
         
 
-    def restore_biases(self, biases, copy_train=False):
-        """Use the given biases to replace existing biases."""
-        if not copy_train:
-            for module_idx, module in enumerate(self.model.modules()):
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                    if module.bias is not None:
-                        module.bias.data.copy_(biases[module_idx])
-        else:
-            for module_idx, module in enumerate(self.model_copy.modules()):
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-                    if module.bias is not None:
-                        module.bias.data.copy_(biases[module_idx])
 
     def get_biases(self):
         """Gets a copy of the current biases."""
@@ -240,7 +243,10 @@ class SparsePruner(object):
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                 weight = module.weight.data
                
-                mask = self.current_masks[module_idx]
+                if self.ticket_masks is None:
+                    mask = self.current_masks[module_idx]
+                else:
+                    mask = self.ticket_masks[module_idx]
 
                 #k = np.count_nonzero(mask.eq(0).cpu().numpy().flatten())
                 #weight[mask.eq(0)] = 1-2*torch.rand(k).cuda()

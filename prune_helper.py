@@ -147,22 +147,35 @@ def compute_average_sparsity(model, masks):
 
 def copy_batchnorm(model_1, model_2):
     for module_1, module_2 in zip(model_1.modules(), model_2.modules()):
-        if isinstance(module_1, nn.BatchNorm2d):
+        if isinstance(module_1, nn.BatchNorm2d): 
             module_2.running_var = module_1.running_var
             module_2.running_mean = module_1.running_mean
+        if isinstance(module_1, nn.LocalResponseNorm):
+            module_2.alpha = module_1.alpha
+            module_2.beta = module_1.beta
+            module_2.k = module_1.k
 
 
 def get_batchnorms(model):
     batch_norms = {}
     for module_idx, module in enumerate(model.modules()):
-        if isinstance(module, nn.BatchNorm2d):
+        if isinstance(module, nn.BatchNorm2d): 
             batch_norms[str(module_idx)+'_var'] = module.running_var
             batch_norms[str(module_idx)+'_mean'] = module.running_mean
+        if isinstance(module, nn.LocalResponseNorm):
+            batch_norms[str(module_idx)+'_alpha'] = module.alpha
+            batch_norms[str(module_idx)+'_beta'] = module.beta
+            batch_norms[str(module_idx)+'_k'] = module.k
     return batch_norms
 
 
-#def apply_batchnorm(dataset_idx):
-#    batchnorms = self.batchnorms[dataset_idx]
-#    for module_idx, module in zip(model.modules()):
-#        if isinstance(module, nn.BatchNorm2d):
-#            model.modules()[module_idx] = batchnorms[module_idx]
+def apply_batchnorm(model, batchnorms):
+    batchnorms = self.batchnorms[dataset_idx]
+    for module_idx, module in zip(model.modules()):
+        if isinstance(module, nn.BatchNorm2d):
+            module.running_var = batch_norms[str(module_idx)+'_var'] 
+            module.running_mean = batch_norms[str(module_idx)+'_mean'] 
+        if isinstance(module, nn.LocalResponseNorm):
+            module.alpha = batch_norms[str(module_idx)+'_alpha']
+            module.beta = batch_norms[str(module_idx)+'_beta']
+            module.k = batch_norms[str(module_idx)+'_k']

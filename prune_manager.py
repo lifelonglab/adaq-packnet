@@ -24,25 +24,37 @@ class Manager(object):
         self.bit_width = bit_width
 
 
-    def eval(self, test_loader, dataset_idx, biases=None, copy_train=False, cv=None):
+    def eval(self, test_loader, dataset_idx, biases=None, copy_train=False, cv=None, replay=False):
         """Performs evaluation."""
         if not self.args.disable_pruning_mask:
             
-            self.pruner.apply_mask(dataset_idx, copy_train=copy_train)
+            self.pruner.apply_mask(dataset_idx)
         if biases is not None:
-            self.pruner.restore_biases(biases, copy_train=copy_train)
+            self.pruner.restore_biases(biases)
 
         self.model.eval()
 
         error_meter = None
+  
+        replay_memory = []
 
         print('Performing eval...')
+        counter = 0
+
         for batch, label in tqdm(test_loader, desc='Eval'):
           
             batch = batch.cuda();
             batch = Variable(batch, volatile=False)
 
-            output = self.model(batch)
+            if not replay:
+                output, _ = self.model(batch)
+            else:
+                output, y = self.model(batch)
+
+            if replay and counter < 100:
+                replay_memory.append(y)
+
+            counter += 1
 
             #label -= 175
             # Init error meter.
@@ -58,7 +70,7 @@ class Manager(object):
                                     t for t in zip(topk, errors)))
         
         self.model.train()
-        return errors
+        return errors, replay_memory
 
 
     def do_batch(self, optimizer, batch, label):
@@ -76,7 +88,7 @@ class Manager(object):
         
         # Do forward-backward.
 
-        output = self.model(batch) 
+        output, _ = self.model(batch) 
 
         #label -= 175
         self.criterion(output, label).backward()
@@ -116,7 +128,7 @@ class Manager(object):
         for batch, label in tqdm(train_loader, desc='Epoch: %d ' % (epoch_idx)):
             self.do_batch(optimizer, batch, label)                         
 
-    def save_model(self, epoch, best_accuracy, errors, directory, checkpoint_name, capacity=None, batch_norms=None):
+    def save_model(self, epoch, best_accuracy, errors, directory, checkpoint_name, capacity=None, batch_norms=None, bit_width=8):
         """Saves model to file."""
         base_model = self.model
 
@@ -126,7 +138,7 @@ class Manager(object):
         self.batchnorms[self.pruner.current_dataset_idx] = {}
 
         for module_idx, module in enumerate(base_model.modules()):
-            if isinstance(module, nn.BatchNorm2d):
+            if isinstance(module, nn.BatchNorm2d) or isinstance(module, nn.LocalResponseNorm):
                 self.batchnorms[self.pruner.current_dataset_idx][module_idx] = module
 
         ckpt = {
@@ -136,10 +148,11 @@ class Manager(object):
             'errors': errors,
             'dataset2idx': self.pruner.current_dataset_idx,
             'previous_masks': self.pruner.current_masks,
-            'masks': self.pruner.masks,
+            'masks': self.pruner.ticket_masks,
             'model': base_model,
             'capacity': capacity,
             'batchnorms': batch_norms,
+            'bit_width': bit_width,
         }
         if self.args.train_biases:
             ckpt['dataset2biases'] = self.dataset2biases
@@ -162,7 +175,7 @@ class Manager(object):
             self.model.train()
             
             self.do_epoch(train_loader, epoch, optimizer)
-            errors = self.eval(test_loader, self.pruner.current_dataset_idx)
+            errors, _ = self.eval(test_loader, self.pruner.current_dataset_idx)
             error_history.append(errors)
             accuracy = 100 - errors[0]  # Top-1 accuracy. 
 
