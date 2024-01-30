@@ -85,6 +85,8 @@ FLAGS.add_argument('--initname', type=str, default='alex_init.pt',
                    help='Location to init model')
 FLAGS.add_argument('--checkpoint', type=str, default='alex_0.pt',
                    help='Name of the checkpoint file')
+FLAGS.add_argument('--next_checkpoint', type=str, default='alex_1.pt',
+                   help='Name of the checkpoint file')
 
 # Pruning options.
 FLAGS.add_argument('--prune_method', type=str,
@@ -327,7 +329,7 @@ def main():
         return
 
     ckpt = torch.load(args.save_prefix + args.loadname)
-    #ckpt = torch.load(args.save_prefix + 'alex_0.pt') 
+    
     model = ckpt['model']
     model.cuda()
     
@@ -479,11 +481,11 @@ def main():
             val_loader = valloaders[args.task-id]
 
 
-        #manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
-        #manager.pruner.current_masks = copy.deepcopy(previous_masks)
-        #errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
-        #import pdb
-        #pdb.set_trace()
+        manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
+        manager.pruner.current_masks = copy.deepcopy(previous_masks)
+        errors = manager.eval(val_loader, manager.pruner.current_dataset_idx)
+        import pdb
+        pdb.set_trace()
         
         if args.prune_method == 'lottery_ticket':  
             layers = {}
@@ -652,7 +654,7 @@ def main():
             errors, _ = manager.eval(val_loader, manager.pruner.current_dataset_idx)
             
             errors_ = errors
-            clusters = 8
+            clusters = 64
             last = {}
              
             #run sensitivity 
@@ -660,6 +662,7 @@ def main():
             layers_sensitivity = []
 
             for layer in range(nlayers):
+                counter = 0
 
                 if args.prune_method == 'lottery_ticket' or args.prune_method == 'lottery_ticket_search':
                     manager_ = Manager(args, copy.deepcopy(manager.model), previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
@@ -673,16 +676,16 @@ def main():
                     if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                         if manager.pruner.ticket_masks is None:
                             if counter == layer:
-                                new_weight = module.weight.data*(manager.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float().cuda()
-                                other_weights = module.weight.data*(manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx).float().cuda()
+                                new_weight = module.weight.data*(manager_.pruner.current_masks[module_idx] == manager.pruner.current_dataset_idx).float().cuda()
+                                other_weights = module.weight.data*(manager_.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx).float().cuda()
 
                                 q_weight, values, labels = vquant(new_weight, n_clusters=clusters)                 
                                 q_weight = torch.from_numpy(q_weight).cuda()                
                 
-                                q_weight[manager.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx] = 0
-                                labels[manager.pruner.current_masks[module_idx].cpu().numpy() != manager.pruner.current_dataset_idx] = -1
+                                q_weight[manager_.pruner.current_masks[module_idx] != manager.pruner.current_dataset_idx] = 0
+                                labels[manager_.pruner.current_masks[module_idx].cpu().numpy() != manager.pruner.current_dataset_idx] = -1
 
-                                new_weight = q_weight*(manager.pruner.current_masks[module_idx] == (manager.pruner.current_dataset_idx)).float().cuda()
+                                new_weight = q_weight*(manager_.pruner.current_masks[module_idx] == (manager.pruner.current_dataset_idx)).float().cuda()
                                 module.weight.data = new_weight + other_weights
 
                         else:
@@ -704,8 +707,8 @@ def main():
                 errors_, _ = manager_.eval(val_loader, manager.pruner.current_dataset_idx)
                 layers_sensitivity.append(errors_[0])
 
-            import pdb
-            pdb.set_trace()
+            #import pdb
+            #pdb.set_trace()
 
             current_masks = copy.deepcopy(manager.pruner.current_masks)
             model = copy.deepcopy(manager.model)
@@ -772,7 +775,7 @@ def main():
 
             if args.prune_method == 'dynamic_mask' or args.prune_method == 'dynamic_mask_search':
                 manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, prune_perc_per_layer=prune_perc_per_layer, masks=None, capacity=capacity, bit_width=bit_width)
-                #manager.pruner.current_masks = copy.deepcopy(previous_masks)
+                manager.pruner.current_masks = copy.deepcopy(current_masks)
 
             #set best quant
             for module_idx, module in enumerate(manager.model.modules()):
@@ -791,8 +794,8 @@ def main():
 
             errors, _ = manager.eval(val_loader, manager.pruner.current_dataset_idx)
 
-            import pdb
-            pdb.set_trace()
+            #import pdb
+            #pdb.set_trace()
 
             model_ = copy.deepcopy(manager.model)
             #get batch norms and save
@@ -802,31 +805,9 @@ def main():
                  
             errors, _ = manager.eval(val_loader, manager.pruner.current_dataset_idx)
 
-            ckpt = torch.load(args.save_prefix + 'alex_0.pt') 
-            model = ckpt['model']
-            model.cuda()
-    
-            capacity = ckpt['capacity']
-            bit_width = ckpt['bit_width']
-   
-            previous_masks = ckpt['previous_masks']
-            mask_t = ckpt['masks']
-            dataset2idx = ckpt['dataset2idx']
-            masks = ckpt['masks']
-            if 'dataset2biases' in ckpt:
-                dataset2biases = ckpt['dataset2biases']
-            else:
-                dataset2biases = {}
-
-            manager = Manager(args, model, previous_masks, dataset2idx, dataset2biases, masks=mask_t, capacity=capacity, bit_width=bit_width)
-            manager.pruner.current_masks = current_masks
-            errors, replay_memory = manager.eval(val_loader, manager.pruner.current_dataset_idx, replay=True)
-
-            import pdb
-            pdb.set_trace()
-
-            manager.pruner.make_finetuning_mask(bit_width=bit_width)      
-            model_bp = copy.deepcopy(manager.model)
+            manager.pruner.make_finetuning_mask(bit_width=bit_width)  
+            manager.save_model(args.epochs, 0.0, errors, directory=args.save_prefix, checkpoint_name=args.next_checkpoint, capacity=capacity, batch_norms=batchnorms, bit_width=bit_width)    
+            #model_bp = copy.deepcopy(manager.model)
      
         elif args.mode == 'eval':     
             # Just run the model on the eval set.
